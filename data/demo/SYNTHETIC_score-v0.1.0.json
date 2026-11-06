@@ -1,0 +1,121 @@
+{
+  "report": "paper evaluation",
+  "data": "SYNTHETIC",
+  "rules_version": "v0.1.0",
+  "rules_hash": "86486171d172",
+  "generated_at": "2030-01-15T18:17:00.000Z",
+  "tuned_on_data_through": null,
+  "decisions_used": 15,
+  "decisions_excluded_as_tuning_data": 0,
+  "first_decision": "2030-01-15T15:08:00.000Z",
+  "last_decision": "2030-01-15T18:14:00.000Z",
+  "valid_windows": 4,
+  "settled_windows": 4,
+  "decision_counts": {
+    "ACT": 2,
+    "SKIP": 13
+  },
+  "skip_reasons": {
+    "duplicate_snapshot": 1,
+    "already_acted_this_window": 1,
+    "no_trend": 1,
+    "edge_below_threshold": 1,
+    "stale_data:coinbase": 1,
+    "missing_data:target_price": 1,
+    "missing_data:orderbook_side_empty": 1,
+    "wrong_market:ticker": 1,
+    "wrong_market:rules_text": 1,
+    "api_error:kalshi_market_list": 1,
+    "api_error:kraken_ticker": 1,
+    "api_error:bitstamp_ticker": 1,
+    "too_close_to_settlement": 1
+  },
+  "strategy_with_trend_filter": {
+    "intents": 2,
+    "settled": 2,
+    "wins": 1,
+    "paper_pnl_dollars": "-3.5200",
+    "trades": [
+      {
+        "ticker": "KXBTC15M-30JAN151015-15",
+        "at": "2030-01-15T15:08:00.000Z",
+        "side": "YES",
+        "price": "0.6600",
+        "fee": "0.016",
+        "contracts": 10,
+        "result": "yes",
+        "win": true,
+        "pnl_per_contract": "0.3240",
+        "pnl_dollars": "3.2400"
+      },
+      {
+        "ticker": "KXBTC15M-30JAN151030-30",
+        "at": "2030-01-15T15:23:00.000Z",
+        "side": "NO",
+        "price": "0.6600",
+        "fee": "0.016",
+        "contracts": 10,
+        "result": "yes",
+        "win": false,
+        "pnl_per_contract": "-0.6760",
+        "pnl_dollars": "-6.7600"
+      }
+    ]
+  },
+  "shadow_without_trend_filter": {
+    "intents": 3,
+    "settled": 3,
+    "wins": 1,
+    "paper_pnl_dollars": "-10.2800",
+    "trades": [
+      {
+        "ticker": "KXBTC15M-30JAN151015-15",
+        "at": "2030-01-15T15:08:00.000Z",
+        "side": "YES",
+        "price": "0.6600",
+        "fee": "0.016",
+        "contracts": 10,
+        "result": "yes",
+        "win": true,
+        "pnl_per_contract": "0.3240",
+        "pnl_dollars": "3.2400"
+      },
+      {
+        "ticker": "KXBTC15M-30JAN151030-30",
+        "at": "2030-01-15T15:23:00.000Z",
+        "side": "NO",
+        "price": "0.6600",
+        "fee": "0.016",
+        "contracts": 10,
+        "result": "yes",
+        "win": false,
+        "pnl_per_contract": "-0.6760",
+        "pnl_dollars": "-6.7600"
+      },
+      {
+        "ticker": "KXBTC15M-30JAN151045-45",
+        "at": "2030-01-15T15:38:00.000Z",
+        "side": "YES",
+        "price": "0.6600",
+        "fee": "0.016",
+        "contracts": 10,
+        "result": "no",
+        "win": false,
+        "pnl_per_contract": "-0.6760",
+        "pnl_dollars": "-6.7600"
+      }
+    ]
+  },
+  "calibration": {
+    "snapshots": 5,
+    "windows": 4,
+    "brier_model": 0.2593920017930809,
+    "brier_market_mid": 0.233265
+  },
+  "assumptions": [
+    "Paper P&L assumes every intent filled in full at the displayed ask at retrieval time. Real orders could fill worse, partially, or not at all; this is an upper bound, not a forecast.",
+    "Fees: taker fee 0.07 x C x P x (1-P) per order, rounded up to the next cent. No maker fees, rebates or rounding refunds are modeled.",
+    "Calibration snapshots inside one 15-minute window are strongly correlated, so the effective sample size is closer to the number of windows than the number of snapshots.",
+    "Settlement uses Kalshi's own reported result. The spot venues are a stand-in for BRTI."
+  ]
+}

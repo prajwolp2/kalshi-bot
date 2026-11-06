@@ -1,0 +1,14 @@
+# Kalshi's Developer Agreement (3.1) forbids sharing data collected via its API.
+data/live/
+data/history/
+__pycache__/
+*.pyc
+
+# Never commit API keys or credentials.
+.env
+.env.*
+*.pem
+*.key
+*.p12
+*secret*
+*credential*
