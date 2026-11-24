@@ -16,11 +16,12 @@ from collections import Counter
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from . import bankroll, kelly, slippage
+from . import bankroll, kelly, sizing, slippage
 from .storage import read_jsonl
 from .timeutil import parse_iso_utc
 
 RUNNING_IF_UPDATED_WITHIN_S = 30
+SERVER_STARTED = time.time()  # an open page reloads itself when this changes, so it never runs old code
 WINDOW_SERIES_S = 900
 
 
@@ -112,12 +113,23 @@ class HistoryProgress:
             bt = self.dir / f"backtest-{self.rules.version}.json"
             if bt.exists():
                 b = json.loads(bt.read_text())
-                out["backtest"] = {"saved_at": bt.stat().st_mtime, "kelly_start": b["kelly_start"], "kelly_end": b["kelly_end"],
+                out["backtest"] = {"saved_at": bt.stat().st_mtime, "contracts": b.get("contracts", 10), "kelly_start": b["kelly_start"], "kelly_end": b["kelly_end"],
+                                   "alt_contracts": b.get("alt_contracts"), "sizing": b.get("sizing"), "robustness": b.get("robustness"),
                                    "months": [{"month": x["month"], "windows": x["windows"], "looks": x.get("minute_looks", 0),
                                                "main_trades": (x.get("main") or {}).get("trades", 0),
-                                               "main": x.get("main"), "kelly": x.get("kelly"),
+                                               "main": x.get("main"), "main_alt": x.get("main_alt"), "sized": x.get("sized"), "kelly": x.get("kelly"),
                                                "brier_model": x.get("brier_model"), "brier_market": x.get("brier_market")}
                                               for x in b["months"]]}
+            mp = self.dir / f"missed-{self.rules.version}.json"
+            if mp.exists():
+                try:
+                    m = json.loads(mp.read_text())
+                except ValueError:
+                    m = None  # being rewritten right now: show it on the next refresh
+                if m and m.get("since"):
+                    out["missed"] = {k: m.get(k) for k in (
+                        "generated_at", "since", "through", "contracts", "windows", "coverage", "online_pct",
+                        "offline_s", "offline_count", "offline_periods", "backtest", "live", "trades")}
             return out
 
 
@@ -140,7 +152,9 @@ def state(log: DecisionLog, data_dir: Path, rules, now: float | None = None, sli
     mine = [d for d in rows if (d.get("evaluated_at") or 0) >= since]
 
     last = rows[-1] if rows else None
-    out = {"now": now, "rules_version": rules.version, "rules_hash": rules.hash(),
+    out = {"now": now, "server_started": SERVER_STARTED,
+           "rules_version": rules.version, "rules_hash": rules.hash(), "contracts": rules.paper_contracts,
+           "sizing": {"per_100usd": rules.contracts_per_100usd, "min": rules.paper_contracts, "max": rules.max_contracts},
            "running": bool(last and now - (last.get("evaluated_at") or 0) < RUNNING_IF_UPDATED_WITHIN_S),
            "last_update": last.get("evaluated_at") if last else None, "checks": len(mine)}
 
@@ -180,6 +194,7 @@ def state(log: DecisionLog, data_dir: Path, rules, now: float | None = None, sli
         out["bankroll"] = {k: _money(v) if k in ("start", "settled_pnl", "open_cost", "balance") else v
                            for k, v in st.items()}
         out["bankroll"]["stop_below"] = _money(bankroll.max_trade_cost(rules))
+        out["contracts"] = sizing.contracts_for(st["balance"], 0, rules)  # the size of the next order
         bal, curve = float(st["start"]), [[acct["start_ts"], float(st["start"])]]
         for tr in sorted((t for t in trades if t["status"] != "open"), key=lambda t: t["close_time"] or ""):
             bal += tr["pnl"]
@@ -250,7 +265,7 @@ th{text-align:left;font-weight:500;color:var(--sub);font-size:12px;border-bottom
 <div class="card"><h2>Model vs Kalshi, this window</h2><div class="chart"><canvas id="c1" role="img" aria-label="Model probability and Kalshi price for the current window"></canvas></div></div>
 </div>
 
-<div class="sec"><span class="dot" style="background:var(--blue)"></span>Main bot <span class="muted">· trend + edge of 2¢ or more after fees · 10 contracts · one trade per window</span></div>
+<div class="sec"><span class="dot" style="background:var(--blue)"></span>Main bot <span class="muted">· trend + edge of 2¢ or more after fees · <span id="ncon">–</span> contracts a trade now<span id="nrule"></span> · one trade per window</span></div>
 <div class="grid">
 <div class="card main"><div class="k">Paper bankroll</div><div class="v" id="bal">–</div><div class="s" id="bal_s"></div></div>
 <div class="card main"><div class="k">Settled P&amp;L</div><div class="v" id="pnl">–</div><div class="s" id="pnl_s"></div></div>
@@ -264,8 +279,24 @@ th{text-align:left;font-weight:500;color:var(--sub);font-size:12px;border-bottom
 <div class="card"><h2>Trades</h2><div class="tablewrap"><table><thead><tr><th>Time (ET)</th><th>Window ends</th><th>Side</th><th>Price</th><th>Cost</th><th>Result</th><th>P&amp;L</th></tr></thead><tbody id="trades"></tbody></table></div>
 <p class="muted" id="shadow"></p></div>
 
+<div id="mcard" style="display:none">
+<div class="sec"><span class="dot" style="background:var(--blue)"></span>Missed while offline <span class="muted" id="msaved"></span></div>
+<div class="grid">
+<div class="card main"><div class="k">Bot running</div><div class="v" id="mon">–</div><div class="s" id="mon_s"></div></div>
+<div class="card main"><div class="k">Windows missed</div><div class="v" id="mwinm">–</div><div class="s" id="mwinm_s"></div></div>
+<div class="card main"><div class="k">Trades missed (backtest)</div><div class="v" id="mtr">–</div><div class="s" id="mtr_s"></div></div>
+<div class="card main"><div class="k">P&amp;L of missed trades</div><div class="v" id="mpnl">–</div><div class="s" id="mpnl_s"></div></div>
+</div>
+<div class="card" style="margin-bottom:12px"><h2>When the bot was running <span class="muted">· shaded = offline · ticks = backtest trades (green won, red lost)</span></h2>
+<div id="mline" style="position:relative;height:34px;border-radius:6px;background:var(--goodbg);overflow:hidden;margin:8px 0 4px"></div>
+<div style="display:flex;justify-content:space-between" class="s"><span id="mline_a"></span><span id="mline_b"></span></div>
+<div class="two" style="margin:12px 0 0"><div id="msum"></div><div id="mwhy" class="muted" style="font-size:13px;line-height:1.6"></div></div></div>
+<div class="card"><h2>Backtest trades since this version went live <span class="muted" id="mtn"></span></h2><div class="tablewrap"><table><thead><tr><th>Time (ET)</th><th>Window ends</th><th>Side</th><th>Price</th><th>Result</th><th>P&amp;L</th><th>Bot was</th></tr></thead><tbody id="mrows"></tbody></table></div>
+<p class="muted">Rebuilt from public 1-minute history with the same rules (one look per minute, fills at the displayed price), so it runs a little optimistic. Refresh: <code>python3 -m kalshi_paper missed</code> (add <code>--every 15</code> to keep it current).</p></div>
+</div>
+
 <div class="sec"><span class="dot" style="background:var(--mute)"></span>Slippage tracker <span class="muted">· every paper trade so far (all rule versions), repriced as a real order from the bot's next checks</span>
-<span class="seg" id="slipsize"><button data-n="10" class="on">10 contracts</button><button data-n="30">30 contracts</button></span></div>
+<span class="seg" id="slipsize"><button data-n="10">10 contracts</button><button data-n="30" class="on">30 contracts</button></span></div>
 <div class="grid" id="slipcards"></div>
 <div class="two">
 <div class="card"><h2>How the price moved right after a signal <span class="muted">· ask at the next check vs the price shown</span></h2><div id="slipmove"></div></div>
@@ -303,10 +334,10 @@ Fees are recomputed at each price. Contracts beyond what was displayed are price
 <div id="bcard" style="display:none">
 <div class="sec"><span class="dot" style="background:var(--blue)"></span>Backtest · Main bot <span class="muted" id="bsaved"></span></div>
 <div class="two">
-<div class="card main"><h2>Profit by month <span class="muted">· 10 contracts a trade</span></h2><div class="chart"><canvas id="c4" role="img" aria-label="Main bot backtest profit by month"></canvas></div></div>
+<div class="card main"><h2>Profit by month <span class="muted" id="bcon"></span></h2><div class="chart"><canvas id="c4" role="img" aria-label="Main bot backtest profit by month"></canvas></div></div>
 <div class="card main"><h2>Summary</h2><div id="bmsum"></div></div>
 </div>
-<div class="card"><div class="tablewrap"><table><thead><tr><th>Month</th><th>Windows</th><th>Trades</th><th>Won</th><th>Win rate</th><th>Avg price</th><th>P&amp;L</th><th>Running total</th><th>vs luck (SD)</th><th>Accuracy model / Kalshi</th></tr></thead><tbody id="bmrows"></tbody></table></div></div>
+<div class="card"><div class="tablewrap"><table><thead><tr><th>Month</th><th>Windows</th><th>Trades</th><th>Won</th><th>Win rate</th><th>Avg price</th><th>Size</th><th>Bankroll start</th><th>Bankroll end</th><th>P&amp;L</th><th>vs luck (SD)</th><th>Accuracy model / Kalshi</th></tr></thead><tbody id="bmrows"></tbody></table></div></div>
 <div class="sec"><span class="dot" style="background:var(--orange)"></span>Backtest · Quarter Kelly <span class="muted">· one bankroll carried month to month</span></div>
 <div class="two">
 <div class="card kel"><h2>Bankroll at each month end</h2><div class="chart"><canvas id="c5" role="img" aria-label="Quarter-Kelly backtest bankroll by month"></canvas></div></div>
@@ -321,8 +352,9 @@ Fees are recomputed at each price. Contracts beyond what was displayed are price
 const $=id=>document.getElementById(id);
 const dark=matchMedia('(prefers-color-scheme: dark)').matches;
 const css=n=>getComputedStyle(document.documentElement).getPropertyValue(n).trim();
-const money=v=>v==null?'–':(v<0?'−':'')+'$'+Math.abs(v).toFixed(2);
-const signed=v=>v==null?'–':(v<0?'−':v>0?'+':'')+'$'+Math.abs(v).toFixed(2);
+const usd=v=>Math.abs(v).toLocaleString('en-US',{minimumFractionDigits:2,maximumFractionDigits:2});
+const money=v=>v==null?'–':(v<0?'−':'')+'$'+usd(v);
+const signed=v=>v==null?'–':(v<0?'−':v>0?'+':'')+'$'+usd(v);
 const et=ts=>new Date(ts*1000).toLocaleTimeString('en-US',{timeZone:'America/New_York',hour:'numeric',minute:'2-digit'});
 const etIso=s=>s?et(Date.parse(s)/1000):'–';
 const pct=v=>v==null?'–':(v*100).toFixed(1)+'%';
@@ -349,7 +381,8 @@ const rate=(w,n)=>n?Math.round(100*w/n)+'%':'–';
 function row(k,v){return `<div class="row"><span>${k}</span><span>${v}</span></div>`}
 function render(s){
   const st=$('status');st.textContent=s.running?'running · updated '+Math.max(0,Math.round(s.now-s.last_update))+'s ago':(s.last_update?'stopped · last update '+et(s.last_update)+' ET':'no data yet');
-  st.className='pill '+(s.running?'on':'off');$('rules').textContent='rules '+s.rules_version;
+  st.className='pill '+(s.running?'on':'off');$('rules').textContent='rules '+s.rules_version;$('ncon').textContent=s.contracts;
+  const z=s.sizing;$('nrule').textContent=z&&z.per_100usd?`, growing with the bankroll (${z.per_100usd} per $100, ${z.min}–${z.max.toLocaleString()})`:'';
   const b=s.bankroll;
   if(b){$('bal').textContent=money(b.balance);$('bal_s').textContent=`of ${money(b.start)} · stops below ${money(b.stop_below)}`+(b.open_cost?` · ${money(b.open_cost)} in an open trade`:'');
     $('pnl').textContent=signed(b.settled_pnl);$('pnl').className='v '+(b.settled_pnl>0?'won':b.settled_pnl<0?'lost':'');$('pnl_s').textContent=`${b.settled} settled trade(s)`;}
@@ -391,7 +424,7 @@ function render(s){
   renderSlip(s.slippage);
   const sh=s.shadow;$('shadow').textContent=sh.length?`Comparison version (no trend filter) flagged ${sh.length} trade(s) this run; results show in python3 -m kalshi_paper score.`:'';
 }
-let slipN='10',lastSlip=null;
+let slipN='30',lastSlip=null;
 document.querySelectorAll('#slipsize button').forEach(b=>b.onclick=()=>{slipN=b.dataset.n;document.querySelectorAll('#slipsize button').forEach(x=>x.classList.toggle('on',x===b));renderSlip(lastSlip);});
 const cents=v=>v==null?'–':Math.round(v*100)+'¢';
 const dc=(a,b)=>a==null?'':` <span class="cents">${a-b>0.0049?'+':''}${Math.round((a-b)*100)}¢</span>`;
@@ -418,17 +451,30 @@ function renderHistory(h){
   const mx=Math.max(1,...h.months.map(m=>m[1]));
   $('hmonths').innerHTML=h.months.map(m=>`<div class="reason"><span>${m[0]}</span><div class="bar" style="width:${Math.max(2,100*m[1]/mx)}%"></div><span>${m[1].toLocaleString()}</span></div>`).join('');
   $('hlog').textContent=(h.log_tail||[]).join(' · ');
+  renderMissed(h.missed);
   const b=h.backtest;
-  if(b){$('bcard').style.display='';$('bsaved').textContent='· run '+new Date(b.saved_at*1000).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+  if(b){$('bcard').style.display='';$('bcon').textContent=b.contracts;$('bsaved').textContent='· run '+new Date(b.saved_at*1000).toLocaleString('en-US',{month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
     const ms=b.months.filter(m=>m.looks);
     const cls=v=>v>0?'won':v<0?'lost':'';
-    let tr=0,won=0,run=0,best=null,worst=null,up=0;
-    $('bmrows').innerHTML=b.months.map(m=>{if(!m.looks)return `<tr><td>${m.month}</td><td>${m.windows.toLocaleString()}</td><td colspan="8" class="muted">no usable minutes yet</td></tr>`;
-      const x=m.main||{};const p=x.trades?x.pnl:0;run+=p;if(x.trades){tr+=x.trades;won+=x.won;up+=p>0;
-        if(!best||p>best[1])best=[m.month,p];if(!worst||p<worst[1])worst=[m.month,p];}
-      return `<tr><td>${m.month}</td><td>${m.windows.toLocaleString()}</td><td>${x.trades||0}</td><td>${x.won||0}</td><td>${rate(x.won,x.trades)}</td><td>${x.trades?Math.round(x.avg_price*100)+'¢':'–'}</td><td class="${cls(p)}">${signed(p)}</td><td class="${cls(run)}">${signed(run)}</td><td>${x.sd_from_zero_edge!=null?(x.sd_from_zero_edge>0?'+':'')+x.sd_from_zero_edge.toFixed(1):'–'}</td><td>${m.brier_model?.toFixed(4)} / ${m.brier_market?.toFixed(4)}</td></tr>`}).join('');
-    $('bmsum').innerHTML=tr?row('Total profit (10 contracts a trade)',`<span class="${cls(run)}">${signed(run)}</span>`)+row('Trades',`${tr.toLocaleString()} (${rate(won,tr)} won)`)
-      +row('Months in profit',`${up} of ${ms.length}`)+row('Best month',best?`${best[0]} ${signed(best[1])}`:'–')+row('Worst month',worst?`${worst[0]} ${signed(worst[1])}`:'–'):'<p class="muted">No trades yet</p>';
+    const sz=b.sizing&&b.sizing.per_100usd?b.sizing:null;
+    $('bcon').textContent=sz?`· size grows with the bankroll, from ${money(sz.start)}`:`· ${b.contracts} contracts a trade`;
+    const mp=m=>sz?(m.sized?m.sized.pnl:0):(m.main&&m.main.trades?m.main.pnl:0);
+    let tr=0,won=0,run=0,best=null,worst=null,up=0,alt=0,lo=null,hi=0;
+    $('bmrows').innerHTML=b.months.map(m=>{if(!m.looks)return `<tr><td>${m.month}</td><td>${m.windows.toLocaleString()}</td><td colspan="10" class="muted">no usable minutes yet</td></tr>`;
+      const x=m.main||{},z=m.sized||{};const p=mp(m);run+=p;alt+=(m.main_alt||{}).pnl||0;
+      if(x.trades){tr+=x.trades;won+=x.won;up+=p>0;if(!best||p>best[1])best=[m.month,p];if(!worst||p<worst[1])worst=[m.month,p];}
+      if(z.trades){lo=lo==null?z.min_contracts:Math.min(lo,z.min_contracts);hi=Math.max(hi,z.max_contracts);}
+      const size=sz?(z.trades?`${z.min_contracts}–${z.max_contracts}`:'–'):b.contracts;
+      return `<tr><td>${m.month}</td><td>${m.windows.toLocaleString()}</td><td>${x.trades||0}</td><td>${x.won||0}</td><td>${rate(x.won,x.trades)}</td><td>${x.trades?Math.round(x.avg_price*100)+'¢':'–'}</td><td>${size}</td><td>${sz?money(z.start):'–'}</td><td>${sz?money(z.end):'–'}</td><td class="${cls(p)}">${signed(p)}</td><td>${x.sd_from_zero_edge!=null?(x.sd_from_zero_edge>0?'+':'')+x.sd_from_zero_edge.toFixed(1):'–'}</td><td>${m.brier_model?.toFixed(4)} / ${m.brier_market?.toFixed(4)}</td></tr>`}).join('');
+    const rb=b.robustness,rr=(x,lbl)=>x&&x.runs?row(lbl,`median ${money(x.median)} · worst 10% ${money(x.worst_10pct)} · <span class="${x.bust_pct>0?'lost':''}">${x.bust_pct}% bust</span>`):'';
+    $('bmsum').innerHTML=tr?(sz?row('Bankroll',`${money(sz.start)} → <span class="${cls(sz.end-sz.start)}">${money(sz.end)}</span>`)+row('Order size',`${sz.per_100usd} contracts per $100 (${lo}–${hi} in the backtest)`):row(`Total profit (${b.contracts} contracts a trade)`,`<span class="${cls(run)}">${signed(run)}</span>`))
+      +row('Trades',`${tr.toLocaleString()} (${rate(won,tr)} won)`)
+      +row('Months in profit',`${up} of ${ms.length}`)+row('Best month',best?`${best[0]} ${signed(best[1])}`:'–')+row('Worst month',worst?`${worst[0]} ${signed(worst[1])}`:'–')
+      +(sz&&b.alt_contracts?row(`Same trades, fixed ${b.alt_contracts} contracts`,`<span class="${cls(alt)}">${signed(alt)}</span>`):'')
+      +(rb?`<div class="k" style="margin-top:10px">Runs from ${money(sz?sz.start:300)} started every 7 days, 180 days each</div>`
+        +rr(rb.rules&&rb.rules['180'],'This size rule')+rr(rb.rules_slip_1c,'…fills 1¢ worse')
+        +rr(rb.fixed&&rb.fixed['180'],`Fixed ${b.alt_contracts} contracts`)+rr(rb.fixed_slip_1c,'…fills 1¢ worse'):'')
+      :'<p class="muted">No trades yet</p>';
     let ktr=0,kwon=0,kup=0,peak=b.kelly_start,dd=0;
     $('bkrows').innerHTML=b.months.map(m=>{if(!m.looks)return `<tr><td>${m.month}</td><td colspan="6" class="muted">no usable minutes yet</td></tr>`;
       const k=m.kelly||{};ktr+=k.trades||0;kwon+=k.won||0;kup+=(k.return_pct||0)>0;peak=Math.max(peak,k.end);dd=Math.max(dd,peak?100*(1-k.end/peak):0);
@@ -441,12 +487,42 @@ function renderHistory(h){
         options:{animation:false,responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:i=>signed(i.parsed.y)}}},scales:{x:{grid:{display:false}},y:{grid:{color:css('--line')},ticks:{callback:v=>'$'+v}}}}});
         c5=new Chart($('c5'),{type:'line',data:{labels:[],datasets:[{data:[],borderColor:css('--orange'),backgroundColor:css('--orange'),borderWidth:2,pointRadius:3}]},
         options:{animation:false,responsive:true,maintainAspectRatio:false,plugins:{legend:{display:false},tooltip:{callbacks:{label:i=>money(i.parsed.y)}}},scales:{x:{grid:{display:false}},y:{grid:{color:css('--line')},ticks:{callback:v=>'$'+v}}}}});}
-      const pn=ms.map(m=>m.main&&m.main.trades?m.main.pnl:0);
+      const pn=ms.map(mp);
       c4.data.labels=labels;c4.data.datasets[0].data=pn;c4.data.datasets[0].backgroundColor=pn.map(v=>v>=0?css('--good'):css('--bad'));c4.update();
       c5.data.labels=['start'].concat(labels);c5.data.datasets[0].data=[b.kelly_start].concat(ms.map(m=>m.kelly.end));c5.update();}}
 }
+const dayEt=ts=>new Date(ts*1000).toLocaleString('en-US',{timeZone:'America/New_York',month:'short',day:'numeric',hour:'numeric',minute:'2-digit'});
+const BOT_WAS={offline:'offline',warming_up:'warming up',online:'running'};
+function renderMissed(m){
+  if(!m)return;$('mcard').style.display='';
+  const cls=v=>v>0?'won':v<0?'lost':'',b=m.backtest,c=m.coverage;
+  const miss={trades:b.offline.trades+b.warming_up.trades,won:b.offline.won+b.warming_up.won,pnl:Math.round((b.offline.pnl+b.warming_up.pnl)*100)/100};
+  $('msaved').textContent=`· rules since ${dayEt(m.since)} ET · backtest updated ${dayEt(m.generated_at)} ET`;
+  $('mon').textContent=m.online_pct!=null?m.online_pct+'%':'–';$('mon_s').textContent=`offline ${dur(m.offline_s)} in ${m.offline_count} stretch(es)`;
+  $('mwinm').textContent=c.missed;$('mwinm_s').textContent=`of ${m.windows} · ${c.partly} partly watched · ${c.watched} fully`;
+  $('mtr').textContent=miss.trades;$('mtr_s').textContent=`${miss.won} won · ${miss.trades-miss.won} lost · ${rate(miss.won,miss.trades)} win rate`;
+  $('mpnl').textContent=signed(miss.pnl);$('mpnl').className='v '+cls(miss.pnl);
+  $('mpnl_s').textContent=miss.pnl<0?'missing them saved money this time':miss.pnl>0?'profit the bot missed':'';
+  const t0=m.since,t1=Math.max(m.generated_at,...(m.offline_periods||[]).map(p=>p[1])),W=t1-t0||1,x=t=>Math.max(0,Math.min(100,100*(t-t0)/W));
+  $('mline').innerHTML=(m.offline_periods||[]).map(p=>`<div title="offline ${dayEt(p[0])} – ${et(p[1])} ET" style="position:absolute;top:0;bottom:0;left:${x(p[0])}%;width:${Math.max(.15,x(p[1])-x(p[0]))}%;background:var(--neutralbg)"></div>`).join('')
+    +m.trades.map(t=>`<div title="${dayEt(t.at)} ET · ${t.side} at ${cents(t.price)} · ${t.won?'won':'lost'} ${signed(t.pnl)} · bot ${BOT_WAS[t.live]}" style="position:absolute;top:6px;bottom:6px;width:3px;margin-left:-1px;border-radius:2px;left:${x(t.at)}%;background:${t.won?'var(--good)':'var(--bad)'}"></div>`).join('');
+  $('mline_a').textContent=dayEt(t0)+' ET';$('mline_b').textContent=dayEt(t1)+' ET';
+  const lv=m.live,on=b.online;
+  $('msum').innerHTML=row(`All backtest trades (${typeof m.contracts==='number'?m.contracts+' contracts':'size '+m.contracts})`,`${b.all.trades} · <span class="${cls(b.all.pnl)}">${signed(b.all.pnl)}</span>`)
+    +row('While the bot was offline',`${b.offline.trades} · <span class="${cls(b.offline.pnl)}">${signed(b.offline.pnl)}</span>`)
+    +row('While it was warming up',`${b.warming_up.trades} · <span class="${cls(b.warming_up.pnl)}">${signed(b.warming_up.pnl)}</span>`)
+    +row('While it was running',`${on.trades} · <span class="${cls(on.pnl)}">${signed(on.pnl)}</span>`)
+    +row('Live paper trades (actual)',`${lv.trades} · <span class="${cls(lv.pnl)}">${signed(lv.pnl)}</span>`);
+  $('mwhy').innerHTML='<b>Why it goes offline</b>: the bot only runs while the Mac is awake. Closing the lid or letting it sleep pauses it; after waking it needs about 30 minutes of its own price data before it can trade again (“warming up”).<br>Results over a day or two are mostly luck: in the 11-month backtest about 4 in 10 two-day stretches lost money.';
+  $('mtn').textContent=`· ${m.trades.length} trade(s), newest first`;
+  $('mrows').innerHTML=m.trades.slice().reverse().map(t=>{const st=t.won?'won':'lost';
+    const was=BOT_WAS[t.live]+(t.live==='online'?(t.live_traded?` · live bought ${t.live_traded}`:' · live didn’t trade'):'');
+    return `<tr><td>${dayEt(t.at)}</td><td>${et(t.close_ts)}</td><td>${t.side}</td><td>${cents(t.price)} ×${t.contracts}</td><td class="${st}">${st}</td><td class="${st}">${signed(t.pnl)}</td><td class="${t.live==='online'?'':'muted'}">${was}</td></tr>`}).join('')||'<tr><td colspan="7" class="muted">No backtest trades yet</td></tr>';
+}
 let lastNow=Date.now()/1000;const s_now=()=>lastNow;
-async function tick(){try{const r=await fetch('/api/state',{cache:'no-store'});const s=await r.json();lastNow=s.now;render(s);}catch(e){const st=$('status');st.textContent='dashboard server not reachable';st.className='pill off';}
+async function tick(){try{const r=await fetch('/api/state',{cache:'no-store'});const s=await r.json();
+  if(window.srvStarted&&s.server_started&&s.server_started!==window.srvStarted){location.reload();return;}  // dashboard was updated
+  window.srvStarted=s.server_started;lastNow=s.now;render(s);}catch(e){const st=$('status');st.textContent='dashboard server not reachable';st.className='pill off';}
   try{const h=await fetch('/api/history',{cache:'no-store'});renderHistory(await h.json());}catch(e){}}
 charts();tick();setInterval(tick,5000);
 </script></body></html>"""

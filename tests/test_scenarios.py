@@ -6,6 +6,7 @@ import io
 import json
 import tempfile
 import unittest
+from dataclasses import replace
 from decimal import Decimal
 from pathlib import Path
 
@@ -47,6 +48,16 @@ class ScenarioTests(unittest.TestCase):
             self.assertFalse(d["intent"]["is_fill"])
             self.assertIn("not a fill", d["intent"]["note"])
 
+    def test_order_size_follows_the_bankroll(self):
+        sc, snap, d = next(r for r in self.results if r[2]["decision"] == "ACT")
+        sizes = {}
+        for cash in (None, 300.0, 4000.0):
+            state = EvalState(bankroll=cash)
+            sizes[cash] = evaluate(copy.deepcopy(snap), replace(RULES, contracts_per_100usd=5.0), state)   # pinned: the sizing rule, not the setting
+            self.assertEqual(sizes[cash]["decision"], "ACT")           # sizing never changes the decision
+        self.assertEqual([sizes[c]["intent"]["contracts"] for c in (None, 300.0, 4000.0)], [10, 15, 200])
+        self.assertEqual(sizes[4000.0]["intent"]["sized_on_bankroll"], 4000.0)
+
     def test_skips_never_carry_an_intent(self):
         for _, _, d in self.results:
             if d["decision"] == "SKIP":
@@ -58,7 +69,8 @@ class ScenarioTests(unittest.TestCase):
         self.assertEqual(len(settlements), 4)
         b = report["strategy_with_trend_filter"]
         self.assertEqual((b["intents"], b["settled"], b["wins"]), (2, 2, 1))
-        # YES @0.66 won: +0.324 x 10; NO @0.66 lost: -0.676 x 10 (fee 1.6c each)
+        # No bankroll given, so the minimum size: YES @0.66 won: +0.324 x 10; NO @0.66 lost: -0.676 x 10
+        # (fee $0.16 an order, 1.6c each)
         self.assertEqual(Decimal(b["paper_pnl_dollars"]), Decimal("-3.52"))
         # 3 in windows 0-3, plus move_already_extended: no trend filter, so no move filter either
         self.assertEqual(report["shadow_without_trend_filter"]["intents"], 4)

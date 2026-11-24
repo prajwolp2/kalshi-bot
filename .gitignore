@@ -1,6 +1,11 @@
 # Kalshi's Developer Agreement (3.1) forbids sharing data collected via its API.
 data/live/
 data/history/
+data/trading-*/
+.venv/
+
+# The server's key and settings (deploy/SERVER.md).
+secrets/
 __pycache__/
 *.pyc
 
@@ -12,3 +17,6 @@ __pycache__/
 *.p12
 *secret*
 *credential*
+
+# macOS folder metadata
+.DS_Store

@@ -24,6 +24,7 @@ from statistics import median
 from . import SYNTHETIC_LABEL
 from .collector import VENUES
 from .model import fair_probability, momentum, settlement_basis, sigma_per_second, taker_fee_per_contract
+from .sizing import contracts_for
 from .timeutil import iso_utc, parse_iso_utc, utc_date
 from .validate import check_market
 
@@ -51,6 +52,7 @@ class EvalState:
     acts_by_window: dict = field(default_factory=dict)
     shadow_by_window: dict = field(default_factory=dict)
     acts_by_day: dict = field(default_factory=dict)
+    bankroll: float | None = None  # paper cash on hand, set by the live loop before each evaluation (sizing)
 
     def record(self, d: dict) -> None:
         if d.get("snapshot_id"):
@@ -290,15 +292,20 @@ def _gates(snap, rules, state, now, ctx):
         raise _Skip("edge_below_threshold", f"{side} edge {edge * 100:+.2f}c after fees")
     if depth < C:
         raise _Skip("insufficient_depth", f"{depth} contracts displayed at {ask}")
+    # Size from the bankroll (v0.4.0), never more than is displayed at this price. The edge check
+    # above used the base size's fee, so sizing never changes which trades are taken.
+    n = min(contracts_for(state.bankroll, float(ask + fee), rules), int(depth))
+    fee_n = taker_fee_per_contract(ask, n, rate)
     return {
         "type": "PAPER_INTENT",
         "is_fill": False,
         "action": "BUY",
         "side": side,
-        "contracts": C,
+        "contracts": n,
+        "sized_on_bankroll": state.bankroll,
         "limit_price": str(ask),
-        "fee_per_contract": str(fee),
-        "edge_per_contract": edge,
+        "fee_per_contract": str(fee_n),
+        "edge_per_contract": float(p_fair if side == "YES" else 1.0 - p_fair) - float(ask) - float(fee_n),
         "displayed_size_at_price": str(depth),
         "note": PAPER_NOTE,
     }

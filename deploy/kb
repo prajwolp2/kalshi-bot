@@ -1,0 +1,22 @@
+#!/usr/bin/env bash
+# kalshi_live commands with this server's settings (secrets/kalshi.env).
+#   deploy/kb status            cash, recent orders, HALT state
+#   deploy/kb smoke [live]      exchange check (defaults to KALSHI_ENV from the env file)
+#   deploy/kb halt | resume     stop / allow orders (the service keeps running)
+#   deploy/kb logs              follow the service log
+set -euo pipefail
+cd "$(dirname "$0")/.."
+set -a
+. secrets/kalshi.env
+set +a
+cmd="${1:-status}"
+shift || true
+if [ "$cmd" = "logs" ]; then
+  exec journalctl -u kalshi-live -f -n 50
+fi
+env="$KALSHI_ENV"
+if [ "${1:-}" = "demo" ] || [ "${1:-}" = "live" ]; then
+  env="$1"
+  shift
+fi
+exec .venv/bin/python -m kalshi_live "$cmd" --env "$env" "$@"

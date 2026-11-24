@@ -73,6 +73,10 @@ class HistoryProgressTests(unittest.TestCase):
             with open(d / "fetch.log", "a") as f:
                 f.write("100 new window(s), 5 new Coinbase minute(s). Cache: 110 windows, 5 minutes.\n")
             self.assertTrue(h.state(now=1040.0)["done"])
+            self.assertNotIn("missed", h.state(now=1041.0))
+            (d / f"missed-{RULES.version}.json").write_text(json.dumps(
+                {"since": 100.0, "generated_at": 200.0, "trades": [], "backtest": {}, "coverage": {}}))
+            self.assertEqual(h.state(now=1042.0)["missed"]["since"], 100.0)
 
 
 class ConcurrentReadTests(unittest.TestCase):

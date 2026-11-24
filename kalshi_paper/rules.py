@@ -14,7 +14,7 @@ from dataclasses import asdict, dataclass
 
 @dataclass(frozen=True)
 class Rules:
-    version: str = "v0.3.0"
+    version: str = "v0.4.2"
 
     # Which contract: "BTC price up in next 15 mins?" (YES if the 60-second BRTI
     # average before close >= the 60-second BRTI average before open).
@@ -69,14 +69,18 @@ class Rules:
     # Edge, fees, size
     edge_threshold: float = 0.02          # dollars per contract, after fees
     taker_fee_rate: float = 0.07          # fee = rate x C x P x (1-P), rounded up to the cent
-    paper_contracts: int = 10
+    paper_contracts: int = 10             # v0.4.0: the minimum size (v0.3.1: a fixed 30)
+    # Bankroll-scaled size (see sizing.py): contracts = bankroll / $100 x contracts_per_100usd,
+    # at least paper_contracts, at most max_contracts. None = always paper_contracts.
+    contracts_per_100usd: float | None = 5.0   # v0.4.2: $450 -> 22, $1,000 -> 50, $20,000+ -> 1,000 (v0.4.1: 7.5)
+    max_contracts: int = 1000             # live books showed >= 1,000 contracts at the best ask in 92% of looks
     max_acts_per_window: int = 1
     daily_paper_cap: int | None = None    # no daily cap (your choice)
 
     # Provenance: which data these parameters were tuned on. The scorer ignores
     # every decision at or before this UTC timestamp, so tuning data is never
     # reused as evidence.
-    tuned_on_data_through: str | None = "2026-11-06T16:15:00Z"
+    tuned_on_data_through: str | None = "2026-11-08T19:30:00Z"
     provenance: str = (
         "v0.1.0: defaults proposed before any live data was collected. Only prior look at "
         "data: a streak check of 6,000 settled outcomes (2026-09-01 to 2026-11-04) that ruled "
@@ -109,7 +113,32 @@ class Rules:
         "shrinking the model toward the market price (fewer trades, lost out of sample), a "
         "pause after recent losses (cut P&L in both halves), and a cap on model-market "
         "disagreement (no better on Dec-Apr). The idea for the move filter came from a "
-        "diagnostic over all months, so it is not a clean out-of-sample result."
+        "diagnostic over all months, so it is not a clean out-of-sample result. "
+        "v0.3.1: paper_contracts 10 -> 30 at the user's request (2026-11-07). Same signals; the fee "
+        "is rounded per order, so per-contract fees at 30 are slightly lower and a few borderline "
+        "edges now pass. Trades also need 30 contracts displayed at the ask. Not fit to any data. "
+        "v0.4.0: order size grows with the paper bankroll, at the user's request (2026-11-08): 5 contracts "
+        "per $100, at least 10, at most 1,000. Signals unchanged: the edge check still uses the fee at "
+        "the base size, so the same trades are taken. Chosen on all public history (5,390 trades, "
+        "2025-12-15 to 2026-11-08) by replaying runs from $300 started every 7 days (34 starts of "
+        "90 days, 22 of 180), not by the single full-history run, which a lucky start dominated "
+        "(it ranked 30-50 contracts per $100 best, but those went bust in 59-88% of 90-day starts). "
+        "A fixed 30 contracts went bust in 23-24% of starts because $18 a trade is about 6% of $300, "
+        "more than the full-Kelly bet for a 1.6c edge (about 4%). 5 per $100 with a floor of 10 never "
+        "went bust in any start, ended 180 days at a median $1,029 (fixed 30: $1,201, but its worst "
+        "10% ended near $19), and stayed above zero with fills 1c worse than shown; 6-7.5 per $100 had a "
+        "slightly higher median but did worse with any slippage. max_contracts 1,000: live books showed "
+        "at least that at the best ask in 92% of looks (31,432 looks, 2026-11-04 to 11-08). "
+        "v0.4.1: 7.5 contracts per $100 instead of 5, at the user's request for more risk (2026-11-12). Same signals. "
+        "Replaying 60-day runs of real backtest days from $400: median $856 at the shown price (5 per $100: $740), "
+        "$597 at 0.5c worse ($585), but a 2% chance of reaching the $100 floor (0%) and a 68% chance of a 50% fall "
+        "from a peak (23%). 10 per $100 and above did worse at 0.5c worse fills; 15 and above reached the floor in "
+        "40-90% of runs. "
+        "v0.4.2: back to 5 contracts per $100 (2026-11-22, the user's choice after a backtest of sizes and limits). "
+        "Same signals. 35 runs of 90 days from $450 with the live bot's new limits (25% of equity per order, stop "
+        "for the day at 30% of the day's start): median $922, worst 10% $362, 14% lost money, none reached the $100 "
+        "floor; at 7.5 per $100 with $100/order and a $150 daily stop: median $792, worst 10% $214, 29% lost money, "
+        "9% reached the floor. With fills 1c worse: $427 vs $258. 180-day runs: median $1,408 vs $882."
     )
 
     def to_dict(self) -> dict:

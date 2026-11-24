@@ -1,0 +1,21 @@
+[Unit]
+Description=Kalshi live-account dashboard (127.0.0.1:8766, open it through an SSH tunnel)
+After=network-online.target
+Wants=network-online.target
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=__APP_DIR__/secrets/kalshi.env
+Environment=PYTHONUNBUFFERED=1
+# Reads the bot's files only; no API key. Listens on this server only, never the internet.
+ExecStart=__APP_DIR__/.venv/bin/python -m kalshi_live dashboard --env ${KALSHI_ENV} --port 8766
+Restart=on-failure
+RestartSec=10
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

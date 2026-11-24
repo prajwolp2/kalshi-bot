@@ -33,7 +33,8 @@ class BankrollTests(unittest.TestCase):
         self.assertEqual([d["market_ticker"] for d in bankroll.counted(decisions, ACCT)], ["new"])
 
     def test_worst_case_trade_cost(self):
-        # 10 contracts at 0.90 + 0.02 = 0.92, fee 0.07 x 10 x 0.92 x 0.08 = 0.0515 -> $0.06
+        # the minimum 10 contracts at 0.90 + 0.02 = 0.92, fee 0.07 x 10 x 0.92 x 0.08 = 0.0515 -> $0.06
+        # (bigger orders are sized to the cash on hand, so they can never cost more than the balance)
         self.assertEqual(bankroll.max_trade_cost(RULES), Decimal("9.26"))
 
     def test_account_survives_a_restart(self):
@@ -53,6 +54,7 @@ class BankrollTests(unittest.TestCase):
         real_print, builtins.print = builtins.print, quiet
         try:
             self.assertFalse(_bankroll_exhausted(bank, RULES, now=0.0))   # $12.12 left
+            self.assertEqual(bank["balance"], 12.12)                       # the live loop sizes orders from this
             bank["acts"] = losers
             self.assertTrue(_bankroll_exhausted(bank, RULES, now=0.0))    # $5.36 left < $9.26
         finally:

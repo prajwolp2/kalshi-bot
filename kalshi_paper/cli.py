@@ -6,6 +6,7 @@
   python3 -m kalshi_paper demo    [--data-dir data/demo]
   python3 -m kalshi_paper history [--days 7] [--data-dir data/history]
   python3 -m kalshi_paper study   [--recent-days 1] [--data-dir data/history]
+  python3 -m kalshi_paper missed  [--every 15]
 """
 
 from __future__ import annotations
@@ -156,6 +157,7 @@ def _bankroll_exhausted(bank: dict, rules, transport=None, now=None) -> bool:
     if not bank.get("acct"):
         return False
     st = bankroll.status(bank["acts"], bank["settled"], bank["acct"])
+    bank["balance"] = float(st["balance"])
     if st["balance"] != bank["last"]:
         bank["last"] = st["balance"]
         print(bankroll.describe(st), flush=True)
@@ -190,6 +192,9 @@ def cmd_run(args) -> int:
             bank.update(acct=acct, acts=bankroll.counted(logged, acct))
             print(f"{bankroll.describe(bankroll.status(bank['acts'], bank['settled'], acct))}; "
                   f"stops below ${bank['floor']:.2f}, the most one paper trade can cost", flush=True)
+            if rules.contracts_per_100usd:
+                print(f"order size grows with the bankroll: {rules.contracts_per_100usd:g} contracts per $100, "
+                      f"at least {rules.paper_contracts}, at most {rules.max_contracts}", flush=True)
         if args.kelly:
             kacct = bankroll.start_or_load(kelly.path_for(p["dir"], rules), args.kelly, time.time())
             bank.update(kelly=kacct, kdecs=[_compact(d) for d in logged if (d.get("evaluated_at") or 0) >= kacct["start_ts"]])
@@ -212,6 +217,7 @@ def cmd_run(args) -> int:
                 day = snap_day
                 threading.Thread(target=_compress_finished_days, args=(p["dir"], day), daemon=True).start()
             append_jsonl(p["dir"] / f"snapshots-{snap_day}.jsonl", snap)
+            state.bankroll = bank.get("balance") if bank and bank.get("acct") else None
             dec = evaluate(snap, rules, state)
             state.record(dec)
             append_jsonl(p["decisions"], dec)
@@ -358,6 +364,35 @@ def cmd_backtest(args) -> int:
     return 0
 
 
+def cmd_missed(args) -> int:
+    from . import history, missed
+    live = Path(args.data_dir)
+    hist = Path(args.history_dir)
+    while True:
+        decisions = read_jsonl(live / f"decisions-{RULES.version}.jsonl")
+        if not decisions:
+            print(f"no live decisions for {RULES.version} in {live} yet")
+            return 1
+        now = int(time.time())
+        if not args.no_fetch:
+            start = int(decisions[0]["evaluated_at"]) - missed.LEAD_S
+            try:
+                history.update(str(hist), RULES.series_ticker, start, now, UrllibTransport(), log=None)
+            except history.HistoryError as e:
+                print(f"history fetch stopped: {e} (using the cache as it is)", file=sys.stderr)
+        windows, spot = history.load(str(hist), RULES.series_ticker)
+        acct_path = bankroll.path_for(live, RULES)
+        start_usd = float(json.loads(acct_path.read_text())["start_usd"]) if acct_path.exists() else 300.0
+        rep = missed.report(decisions, windows, spot, RULES, now=time.time(), start_usd=start_usd)
+        out = hist / f"missed-{RULES.version}.json"
+        out.write_text(json.dumps(rep, indent=2))
+        print(missed.format_report(rep))
+        print(f"\nsaved: {out}", flush=True)
+        if not args.every:
+            return 0
+        time.sleep(args.every * 60)
+
+
 def cmd_slippage(args) -> int:
     from . import slippage
     d = Path(args.data_dir)
@@ -400,6 +435,11 @@ def main(argv=None) -> int:
     sl = sub.add_parser("slippage", help="reprice every paper trade as a real order would have filled")
     sl.add_argument("--contracts", type=int, default=None, help="order size to test (default: each trade's own)")
     sl.add_argument("--data-dir", default="data/live")
+    mi = sub.add_parser("missed", help="backtest the windows since this rules version went live: what the bot missed")
+    mi.add_argument("--every", type=float, default=None, help="repeat every N minutes (default: run once)")
+    mi.add_argument("--no-fetch", action="store_true", help="use the history cache as it is")
+    mi.add_argument("--data-dir", default="data/live")
+    mi.add_argument("--history-dir", default="data/history")
     args = ap.parse_args(argv)
     if args.cmd == "run" and args.interval < 1:
         ap.error("--interval must be at least 1 second")
@@ -409,4 +449,4 @@ def main(argv=None) -> int:
         ap.error("--recent-days must be more than 0")
     return {"run": cmd_run, "score": cmd_score, "replay": cmd_replay, "demo": cmd_demo,
             "history": cmd_history, "study": cmd_study, "dashboard": cmd_dashboard,
-            "backtest": cmd_backtest, "slippage": cmd_slippage}[args.cmd](args)
+            "backtest": cmd_backtest, "slippage": cmd_slippage, "missed": cmd_missed}[args.cmd](args)

@@ -4,7 +4,13 @@
     {
       "name": "dashboard",
       "runtimeExecutable": "python3",
-      "runtimeArgs": ["-m", "kalshi_paper", "dashboard", "--port", "8765"],
+      "runtimeArgs": [
+        "-m",
+        "kalshi_paper",
+        "dashboard",
+        "--port",
+        "8765"
+      ],
       "port": 8765,
       "url": "http://127.0.0.1:8765"
     }

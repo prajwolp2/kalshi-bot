@@ -1,0 +1,25 @@
+[Unit]
+Description=Kalshi KXBTC15M bot (kalshi_live)
+After=network-online.target time-sync.target
+Wants=network-online.target
+# Stop retrying if it fails to start 5 times in 10 minutes (e.g. a missing key); see journalctl.
+StartLimitIntervalSec=600
+StartLimitBurst=5
+
+[Service]
+Type=simple
+User=__USER__
+WorkingDirectory=__APP_DIR__
+EnvironmentFile=__APP_DIR__/secrets/kalshi.env
+Environment=PYTHONUNBUFFERED=1
+ExecStart=__APP_DIR__/.venv/bin/python -m kalshi_live run --env ${KALSHI_ENV} $KALSHI_RUN_FLAGS
+# A crash or a network outage restarts it after 30 s. A safety HALT does not stop the process:
+# it keeps watching the market and logging, but places no orders until `deploy/kb resume`.
+Restart=on-failure
+RestartSec=30
+NoNewPrivileges=true
+PrivateTmp=true
+ProtectSystem=full
+
+[Install]
+WantedBy=multi-user.target

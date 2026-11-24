@@ -4,13 +4,21 @@
 or why they wouldn't (SKIP). It has no order code, no API key, no authenticated client and no live mode. An ACT is a
 paper intent, not an order and not a fill.
 
-Standard library only (no installs). Tested on Python 3.15.
+**Real orders live in a separate package, `kalshi_live`.**
+- It runs the same rules unchanged and turns each ACT into one immediate-or-cancel buy on your
+  Kalshi account (or Kalshi's demo exchange), behind hard limits and a HALT switch.
+- It is meant to run on a server you set up: see [deploy/SERVER.md](deploy/SERVER.md).
+- `kalshi_paper` still can't trade. tests/test_safety.py checks that, and tests/test_live.py checks
+  that it never imports `kalshi_live`.
+
+Standard library only (no installs). Tested on Python 3.15 and 3.13. `kalshi_live` alone needs
+`cryptography` for request signing; deploy/setup.sh installs it on the server.
 
 ## Commands
 
 ```bash
 python3 -m kalshi_paper demo                 # SYNTHETIC scenarios through the real code, no network
-python3 -m unittest -v                       # 69 tests, no network
+python3 -m unittest -v                       # 114 tests, no network (1 skipped without `cryptography`)
 python3 -m kalshi_paper run --interval 2     # live public data every 2 s until Ctrl-C
 python3 -m kalshi_paper run --minutes 60     # ...or for a fixed time
 python3 -m kalshi_paper run --bankroll 100   # ...or until a $100 PAPER bankroll can't cover another trade
@@ -22,6 +30,7 @@ python3 -m kalshi_paper history              # cache the last 7 days of public 1
 python3 -m kalshi_paper study                # check the rules on that history: last day vs the days before
 python3 -m kalshi_paper backtest             # both strategies month by month on all cached history (~1 min)
 python3 -m kalshi_paper slippage --contracts 30   # reprice every paper trade as a real market or limit order
+python3 -m kalshi_paper missed --every 15    # backtest the windows since this version went live: trades missed while offline
 ```
 
 Warm-up after a fresh start:
@@ -151,6 +160,8 @@ These numbers are in-sample, because v0.2.0 was chosen on this data. Minute bars
 | v0.1.1 | `max_candle_lag_s` 300 → 600 | Coinbase's cached candles lagged 302–337 s on 11 of 143 ticks. This is a freshness fix, chosen without looking at prices, edges or outcomes. The scorer ignores anything at or before 05:17:23 UTC. |
 | v0.2.0 | Fair value adds the measured gap between the strike and our price; volatility ×1.05 | The gap showed up in both periods and in the live run. Wider volatility had the better log loss in both periods and in the live run. Neither was chosen by paper P&L. The trend filter, edge threshold and everything else are unchanged, because nothing else held up. The scorer ignores anything at or before 16:31 UTC on 2026-11-04. |
 | v0.3.0 | Skip a buy in the direction BTC already moved more than 0.30% over the last hour (`move_already_extended`). The quarter-Kelly tracker now sizes only the main rules' trades, at most 200 contracts. | See "The 11-month backtest" below. The scorer ignores anything at or before 16:15 UTC on 2026-11-06. |
+| v0.3.1 | 30 contracts per paper trade instead of 10 (your choice). Same signals; trades need 30 contracts displayed at the ask. | Backtest at 30 contracts: +$2,594 over 5,369 trades (minute bars, optimistic fills). |
+| v0.4.0 | Order size grows with the paper bankroll: 5 contracts per $100, at least 10, at most 1,000 (`sizing.py`). Same signals and trades; only the size changes. | $300 → $6,515 on all history. Runs of 180 days from $300, started every 7 days: median $978, none went bust (a fixed 30 contracts: median $1,162, 23% went bust). |
 
 ## The 11-month backtest (the study behind v0.3.0)
 
@@ -233,7 +244,7 @@ Every 2 seconds (`--interval 2`):
 - Fewer than two window opens in the last 2 hours were measured against the strike
   (`insufficient_basis_history`), or the measured gap is over 0.05% of the price (`basis_out_of_range`).
 - The YES mid is outside 10–90¢, or the spread is wider than 2¢.
-- There is no trend, the move is already extended (`move_already_extended`), the edge is too small, or fewer than 10 contracts are displayed at the ask.
+- There is no trend, the move is already extended (`move_already_extended`), the edge is too small, or fewer than the minimum 10 contracts are displayed at the ask. Otherwise it buys its bankroll-scaled size, or everything displayed at the ask if that is less.
 - A paper trade was already logged in this window, or this snapshot was already seen.
 
 Every decision also logs a **shadow** result: the same rules *without* the momentum filter. The scorer
@@ -356,6 +367,8 @@ paces itself at about 5 requests per second and gives up on a request after 4 tr
 3. **Historical execution simulation.** Only after agreeing the fill and slippage assumptions above.
 4. **v0.3 rules.** Only if live data or a longer study shows a pattern that holds in more than one period.
    The analysis behind v0.2.0 found none that makes money.
-5. **Kalshi's demo environment.** An authenticated client against demo funds, using demo keys you create.
-6. **Live trading.** Your own API key, small size, hard exposure limits and a kill switch, run by you.
-7. **Deployment.** An always-on host with monitoring.
+5. **Kalshi's demo environment.** Built: `kalshi_live --env demo` ([deploy/SERVER.md](deploy/SERVER.md), step 6).
+6. **Live trading.** Built, not yet run against Kalshi: `kalshi_live --env live`, with your own key, hard
+   limits and a HALT switch, run by you.
+7. **Deployment.** Built: a systemd service and setup script for an Ubuntu server. Monitoring is the
+   journal plus `deploy/kb status`; there are no phone alerts yet.

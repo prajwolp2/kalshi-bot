@@ -60,7 +60,7 @@ class PaperTradeTests(unittest.TestCase):
         self.assertEqual(len(trades), 1)
         t = trades[0]
         self.assertEqual((t["side"], t["price"], t["won"]), ("YES", 0.66, True))
-        self.assertAlmostEqual(t["pnl"], 10 * (1 - 0.66 - 0.016))
+        self.assertAlmostEqual(t["pnl"], RULES.paper_contracts * (1 - 0.66 - 0.016))
 
     def test_gates(self):
         cases = {

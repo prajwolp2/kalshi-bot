@@ -28,6 +28,8 @@ from .evaluator import move_already_extended
 from .model import fair_probability, momentum, settlement_basis, sigma_per_second, taker_fee_per_contract
 
 BOOTSTRAP = 200
+ALT_CONTRACTS = 30  # the backtest also reports the main strategy at this fixed size (v0.3.1's size)
+SIZED_START = 300.0  # the bankroll-scaled backtest starts here (the live paper bankroll)
 CAVEATS = [
     "Minute bars: one look per minute (the live bot looks every 2 s), Coinbase only (live uses a "
     "3-exchange median), and paper fills at the displayed ask with no slippage or size limit.",
@@ -226,7 +228,9 @@ def monthly(windows: list, spot: dict, rules, kelly_start: float = 100.0, month_
     groups: dict = {}
     for i, w in enumerate(ws):
         groups.setdefault(month_of(w["close_ts"]), []).append(i)
-    months, balance = [], kelly_start
+    from . import sizing
+
+    months, balance, sized_bal, all_trades = [], kelly_start, SIZED_START, []
     for month, idx in groups.items():
         lead = ws[max(0, idx[0] - rules.basis_windows):idx[0]]  # earlier windows only feed the price-gap estimate
         mine = {ws[i]["ticker"] for i in idx}
@@ -239,21 +243,41 @@ def monthly(windows: list, spot: dict, rules, kelly_start: float = 100.0, month_
         acct = {"start_ts": min(by_t[t]["open_ts"] for t in mine), "start_usd": f"{balance:.2f}"}
         settled = {t: {"result": by_t[t]["result"]} for t in mine}
         k = kelly.simulate(_as_decisions(main_trades, rows, by_t), settled, acct, rules)
+        timed = [{"at": by_t[t["ticker"]]["open_ts"] + 60 * t["minute"], "close_ts": by_t[t["ticker"]]["close_ts"],
+                  "side": t["side"], "price": t["price"], "won": t["won"]} for t in main_trades]
+        all_trades += timed
+        # Bankroll-scaled size, one bankroll carried month to month (every trade settles inside its month).
+        sz = sizing.simulate(timed, sized_bal, rules)
         months.append({
             "month": month, "windows": len(idx), "minute_looks": len(rows),
             "brier_model": round(_brier(rows, "p"), 4), "brier_market": round(_brier(rows, "mid"), 4),
             "main": main,
-            "main_20": _book(paper_trades(rows, rules, True, contracts=20), 20),
+            "main_alt": _book(paper_trades(rows, rules, True, contracts=ALT_CONTRACTS), ALT_CONTRACTS),
             "kelly": {"trades": len(k["trades"]), "won": k["wins"], "start": balance, "end": k["balance"],
                       "return_pct": round(100 * (k["balance"] / balance - 1), 2) if balance else None},
+            "sized": {"trades": sz["trades"], "won": sz["won"], "start": sized_bal, "end": sz["end"],
+                      "pnl": round(sz["end"] - sized_bal, 2),
+                      "min_contracts": min((x["contracts"] for x in sz["taken"]), default=0),
+                      "max_contracts": sz["max_contracts"], "max_drawdown": sz["max_drawdown"],
+                      "stopped": sz["stopped_at"] is not None},
         })
-        balance = k["balance"]
+        balance, sized_bal = k["balance"], sz["end"]
+    all_trades.sort(key=lambda t: t["at"])
+    fixed = replace(rules, paper_contracts=ALT_CONTRACTS, contracts_per_100usd=None)
+    robust = {"rules": {d: sizing.rolling(all_trades, SIZED_START, rules, days=d) for d in (90, 180)},
+              "rules_slip_1c": sizing.rolling(all_trades, SIZED_START, rules, days=180, slippage=0.01),
+              "fixed": {d: sizing.rolling(all_trades, SIZED_START, fixed, days=d) for d in (90, 180)},
+              "fixed_slip_1c": sizing.rolling(all_trades, SIZED_START, fixed, days=180, slippage=0.01)}
     return {"report": "monthly backtest", "rules_version": rules.version, "rules_hash": rules.hash(),
-            "kelly_start": kelly_start, "kelly_end": balance, "months": months, "caveats": CAVEATS}
+            "contracts": rules.paper_contracts, "alt_contracts": ALT_CONTRACTS, "kelly_start": kelly_start, "kelly_end": balance,
+            "sizing": {"per_100usd": rules.contracts_per_100usd, "min": rules.paper_contracts, "max": rules.max_contracts,
+                       "start": SIZED_START, "end": sized_bal},
+            "robustness": robust, "months": months, "caveats": CAVEATS}
 
 
 def format_monthly(r: dict) -> str:
-    lines = [f"Monthly backtest - rules {r['rules_version']} on public 1-minute history (paper, 10 contracts for the main strategy)",
+    n, alt = r.get("contracts", 10), r.get("alt_contracts", 20)
+    lines = [f"Monthly backtest - rules {r['rules_version']} on public 1-minute history (paper, {n} contracts for the main strategy)",
              "", f"{'month':8} {'windows':>7} | {'main: trades  won (model said)   P&L        SD':48} | "
                  f"{'quarter Kelly: trades  bankroll':31} | {'Brier model/market':18}"]
     tot = {"trades": 0, "won": 0, "pnl": 0.0}
@@ -274,10 +298,28 @@ def format_monthly(r: dict) -> str:
                      f"| {m['brier_model']:.4f}/{m['brier_market']:.4f}")
     if tot["trades"]:
         lines += ["", f"Main strategy, all months: {tot['trades']} trades, won {tot['won'] / tot['trades']:.0%}, "
-                      f"P&L {_money(tot['pnl'])} at 10 contracts a trade",
-                  f"Same rules at 20 contracts a trade: P&L "
-                  f"{_money(sum(m.get('main_20', {}).get('pnl', 0) for m in r['months']))}",
+                      f"P&L {_money(tot['pnl'])} at {n} contracts a trade",
+                  f"Same rules at {alt} contracts a trade: P&L "
+                  f"{_money(sum(m.get('main_alt', m.get('main_20', {})).get('pnl', 0) for m in r['months']))}",
                   f"Quarter Kelly: ${r['kelly_start']:,.2f} -> ${r['kelly_end']:,.2f}"]
+    sz, rb = r.get("sizing"), r.get("robustness")
+    if sz and sz.get("per_100usd"):
+        lines += ["", f"Size grows with the bankroll ({sz['per_100usd']:g} contracts per $100, {sz['min']}-{sz['max']}): "
+                      f"${sz['start']:,.2f} -> ${sz['end']:,.2f} over all months"]
+        for m in r["months"]:
+            s = m.get("sized")
+            if s:
+                lines.append(f"  {m['month']:8} {s['trades']:>4} trades  ${s['start']:>10,.2f} -> ${s['end']:>10,.2f}  "
+                             f"size {s['min_contracts']}-{s['max_contracts']}" + ("  STOPPED" if s["stopped"] else ""))
+    if rb:
+        lines += ["", f"Runs from ${SIZED_START:,.0f} started every 7 days (median end, worst 10%, share that went bust):"]
+        for key, label in (("rules", "this size rule"), ("fixed", f"fixed {ALT_CONTRACTS} contracts")):
+            for d, x in rb[key].items():
+                if x.get("runs"):
+                    lines.append(f"  {label:18} {d:>4} days, {x['runs']:>2} runs: ${x['median']:>9,.2f}  ${x['worst_10pct']:>9,.2f}  {x['bust_pct']:>5.1f}% bust")
+            x = rb[f"{key}_slip_1c"]
+            if x.get("runs"):
+                lines.append(f"  {label:18}  180 days, fills 1c worse: ${x['median']:>9,.2f}  ${x['worst_10pct']:>9,.2f}  {x['bust_pct']:>5.1f}% bust")
     lines += ["", "Caveats:"] + [f"  - {c}" for c in r["caveats"]]
     return "\n".join(lines)
 
